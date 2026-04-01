@@ -278,33 +278,27 @@ st.markdown("""
 # ─────────────────────────────────────────────
 
 def _try_pypdf(data: bytes) -> str | None:
-    """Primary extractor: pypdf (modern successor to PyPDF2)."""
+    """Primary: pypdf — fast, handles most standard PDFs."""
     try:
         from pypdf import PdfReader
         reader = PdfReader(BytesIO(data))
+        # Attempt to decrypt with empty password (some PDFs have open-but-encrypted flag)
+        if reader.is_encrypted:
+            try:
+                reader.decrypt("")
+            except Exception:
+                pass
         pages = []
         for page in reader.pages:
             try:
-                t = page.extract_text()
-                if t:
+                t = page.extract_text(extraction_mode="layout")
+                if t and t.strip():
                     pages.append(t)
             except Exception:
-                pass
-        return "\n".join(pages) if pages else None
-    except Exception:
-        return None
-
-
-def _try_pdfplumber(data: bytes) -> str | None:
-    """Fallback extractor: pdfplumber — better on complex layouts."""
-    try:
-        import pdfplumber
-        pages = []
-        with pdfplumber.open(BytesIO(data)) as pdf:
-            for page in pdf.pages:
                 try:
+                    # Fallback to plain mode if layout mode fails
                     t = page.extract_text()
-                    if t:
+                    if t and t.strip():
                         pages.append(t)
                 except Exception:
                     pass
@@ -313,16 +307,68 @@ def _try_pdfplumber(data: bytes) -> str | None:
         return None
 
 
-def _try_pymupdf(data: bytes) -> str | None:
-    """Second fallback: PyMuPDF (fitz) — handles many edge cases."""
+def _try_pdfplumber(data: bytes) -> str | None:
+    """Fallback: pdfplumber — better on multi-column, tabular layouts."""
     try:
-        import fitz  # PyMuPDF
+        import pdfplumber
+        pages = []
+        with pdfplumber.open(BytesIO(data)) as pdf:
+            for page in pdf.pages:
+                try:
+                    # Use layout=True for better text ordering
+                    t = page.extract_text(layout=True)
+                    if t and t.strip():
+                        pages.append(t)
+                except Exception:
+                    try:
+                        t = page.extract_text()
+                        if t and t.strip():
+                            pages.append(t)
+                    except Exception:
+                        pass
+        return "\n".join(pages) if pages else None
+    except Exception:
+        return None
+
+
+def _try_pymupdf(data: bytes) -> str | None:
+    """Fallback: PyMuPDF — robust on malformed, compressed, or XFA PDFs."""
+    try:
+        import fitz
         doc = fitz.open(stream=data, filetype="pdf")
         pages = []
         for page in doc:
             try:
-                t = page.get_text()
-                if t:
+                t = page.get_text("text")
+                if t and t.strip():
+                    pages.append(t)
+            except Exception:
+                pass
+        return "\n".join(pages) if pages else None
+    except Exception:
+        return None
+
+
+def _try_ocr(data: bytes, dpi: int = 200) -> str | None:
+    """
+    Last-resort OCR fallback using pdf2image + pytesseract.
+    Converts each page to a raster image then runs Tesseract OCR.
+    Works on:
+      - Scanned PDFs (image-only, no text layer)
+      - PDFs with garbled/embedded-font encoding issues
+      - Password-protected read-only PDFs where text copy is blocked
+    DPI 200 is a balance between accuracy and speed; raise to 300 for
+    higher fidelity on small text.
+    """
+    try:
+        from pdf2image import convert_from_bytes
+        import pytesseract
+        images = convert_from_bytes(data, dpi=dpi)
+        pages = []
+        for img in images:
+            try:
+                t = pytesseract.image_to_string(img, config="--psm 6")
+                if t and t.strip():
                     pages.append(t)
             except Exception:
                 pass
@@ -334,20 +380,26 @@ def _try_pymupdf(data: bytes) -> str | None:
 @st.cache_data(show_spinner=False)
 def extract_text(file_data: bytes, filename: str) -> tuple[str, str]:
     """
-    Try multiple PDF extractors in order of reliability.
-    Returns (text, method_used).
-    Cached by file content hash so repeated reruns are instant.
+    4-layer extraction chain. Each layer is only attempted if the previous
+    returned empty text (not an error). Returns (text, method_label).
+    Cached by file content so reruns never re-extract the same PDF.
+
+    Layer 1 — pypdf        : fast, standard PDFs
+    Layer 2 — pdfplumber   : better column/table layout handling
+    Layer 3 — PyMuPDF      : malformed / XFA / compressed PDFs
+    Layer 4 — OCR          : scanned images, encoding-broken PDFs
     """
     for extractor, label in [
-        (_try_pypdf,     "pypdf"),
-        (_try_pdfplumber,"pdfplumber"),
-        (_try_pymupdf,   "PyMuPDF"),
+        (_try_pypdf,      "pypdf"),
+        (_try_pdfplumber, "pdfplumber"),
+        (_try_pymupdf,    "PyMuPDF"),
+        (_try_ocr,        "OCR (tesseract)"),
     ]:
         result = extractor(file_data)
         if result and result.strip():
             return result.strip(), label
 
-    return "", "failed"
+    return "", "all methods failed"
 
 
 # ─────────────────────────────────────────────
@@ -479,9 +531,10 @@ if files1 and files2:
         # ── Show extraction issues ────────────
         if extraction_errors:
             st.markdown(
-                f'<div class="error-box">⚠️ Could not extract text from: '
-                f'{", ".join(extraction_errors)}. '
-                f'They may be scanned images — consider OCR preprocessing.</div>',
+                f'<div class="error-box">⚠️ All extraction methods (pypdf → pdfplumber → '
+                f'PyMuPDF → OCR) returned no text for: {", ".join(extraction_errors)}.<br>'
+                f'The file(s) may be blank, corrupted, or use unsupported encryption. '
+                f'Try opening in Adobe Reader to verify.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -539,7 +592,7 @@ if files1 and files2:
                 st.markdown(
                     f'<div class="compare-header">'
                     f'<div class="title">{f1.name}  ⟶  {f2.name}</div>'
-                    f'<div class="sub">Extracted via {m1} · {m2}</div>'
+                    f'<div class="sub">Extracted via '                    f'{"🔍 OCR" if "OCR" in m1 else m1} · '                    f'{"🔍 OCR" if "OCR" in m2 else m2}</div>'
                     f'</div>',
                     unsafe_allow_html=True,
                 )
