@@ -28,18 +28,22 @@ results = {}
 skipped_pairs = []
 
 if files1 and files2:
+    used_f2 = set()  # Track already-matched Set 2 files
     for f1 in files1:
         base1 = base_name(f1.name)
         best_match = None
         highest_score = 0.0
         for f2 in files2:
+            if f2.name in used_f2:
+                continue  # Skip already-paired files
             base2 = base_name(f2.name)
             score = calc_similarity(base1, base2)
-            if score > highest_score and base1 != base2:
+            if score > highest_score:  # ← removed the base1 != base2 condition
                 highest_score = score
                 best_match = f2
         if best_match and highest_score > 0.5:
             pairs.append((f1, best_match, highest_score))
+            used_f2.add(best_match.name)  # Mark as used
     
     st.write(f"Found {len(pairs)} file pairs by filename similarity.")
     
