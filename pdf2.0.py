@@ -430,13 +430,28 @@ def similarity_emoji(score: float) -> str:
 # STEP 1 — UPLOAD
 # ─────────────────────────────────────────────
 st.markdown('<div class="step-label">Step 1 — Upload</div>', unsafe_allow_html=True)
-col_u1, col_u2 = st.columns(2)
+
+if "upload_key" not in st.session_state:
+    st.session_state.upload_key = 0
+
+col_u1, col_u2, col_clr = st.columns([2, 2, 1])
 with col_u1:
-    files1 = st.file_uploader("Set 1 (Old / Reference)", type="pdf",
-                               accept_multiple_files=True)
+    files1 = st.file_uploader(
+        "Set 1 (Old / Reference)", type="pdf", accept_multiple_files=True,
+        key=f"uploader_s1_{st.session_state.upload_key}",
+    )
 with col_u2:
-    files2 = st.file_uploader("Set 2 (New / Comparison)", type="pdf",
-                               accept_multiple_files=True)
+    files2 = st.file_uploader(
+        "Set 2 (New / Comparison)", type="pdf", accept_multiple_files=True,
+        key=f"uploader_s2_{st.session_state.upload_key}",
+    )
+with col_clr:
+    st.markdown("<div style='height:1.9rem'></div>", unsafe_allow_html=True)
+    if st.button("🗑 Clear files", key="clear_uploads",
+                 help="Remove all uploaded files and reset the session",
+                 use_container_width=True):
+        st.session_state.upload_key += 1
+        st.rerun()
 
 # ─────────────────────────────────────────────
 # STEP 2 — CONFIGURE
